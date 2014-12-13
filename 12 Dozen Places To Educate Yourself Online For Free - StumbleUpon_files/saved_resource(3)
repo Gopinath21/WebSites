@@ -1,0 +1,1 @@
+document.write('<ifr' +'ame src="http://www.marcandangel.com/other/defaultads.html" width="160" height="600" frameborder="0" marginwidth="0" marginheight="0" hspace="0" vspace="0" scrolling="no">');document.write('</ifr' + 'ame>');

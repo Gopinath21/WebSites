@@ -1,0 +1,3563 @@
+/**
+ * Global form handler
+ *
+ * Use for form validation
+ *
+ * @author jrylan
+ */
+
+/*
+ How to use this code:
+
+ $(function(){
+    var test = new Base.FormHandler.extend({
+        selector: $('.form'),
+
+        restURL: "blah",
+
+        // If you provide a `submit` callback, it's boolean return value will
+        // determine if the ajax validation request should be should be processed.
+        submit: function() {
+            if (doSomething) {
+                return true;
+            }
+            return false;
+        },
+
+        inputs: [
+            {
+                id: "text1",
+                validateUrl: "foo1.php",
+                validateOn: "blur",
+                validate: function() {
+                    this.ajaxValidation();
+                }
+            }
+        ]
+    });
+});
+*/
+
+(function() {
+    /*
+     * Setup the view
+     */
+    var view = Base.View.extend({
+        initialize: function() {
+            this.$error = this.$el.find(".alert-message");
+            this.$errorMsg = this.$error.find("p");
+        },
+
+        showTopLevelErrors: function(collection) {
+            if (!this.$error || collection.submitted !== true) {
+                return;
+            }
+
+            if (collection.formErrors) {
+                this.$errorMsg.html( collection.formErrors.join("<br>") );
+            } else {
+                this.$errorMsg.html( this.$errorMsg.data("original") );
+            }
+
+            this.$error.removeClass("hide");
+        },
+
+        hideTopLevelErrors: function() {
+            this.$error.addClass("hide");
+        },
+
+        toggleStatus: function(model) {
+            var status = model.get("status");
+
+            if (status == "success") {
+                model.$wrap.removeClass("error").addClass("success");
+            }
+            else if (status == "error" || status == "error-soft") {
+                model.$wrap.removeClass("success").addClass("error");
+            }
+            else {
+                model.$wrap.removeClass("success").removeClass("error");
+            }
+        },
+
+        setErrorMessage: function(model) {
+            var errors = model.get("errors");
+
+            if (typeof errors != "string") {
+                errors = errors.join("<br>");
+            }
+
+            model.$wrap.find(".s-error").html(errors);
+        },
+
+        setActive: function($el) {
+            $el.parents(".wrapper-input").addClass("active");
+        },
+
+        setInactive: function($el) {
+            $el.parents(".wrapper-input").removeClass("active");
+        }
+    });
+
+
+
+    /*
+     * Setup the model
+     */
+    var input = Base.Model.extend({
+        defaults: {
+            active: false,
+            error: false
+        },
+
+        initialize: function() {
+            var self = this;
+
+            if (this.attributes.type != "radio") {
+                this.$el = $("#" + this.id);
+                this.$el.data("__id__", this.id);
+
+                this.$wrap = this.$el.parents(".wrapper-input");
+                this.type = (this.$el.attr("type") || this.$el[0].tagName).toLowerCase();
+                if (this.type == "input") {
+                    this.type = "text";
+                }
+
+                this.name = (this.$el.attr("name") || this.id);
+
+                if (this.attributes.validateOn) {
+                    this.$el.bind(this.attributes.validateOn, function(e){
+                        self.set("value", self.getValue());
+                        self.inputValidation(e);
+                    });
+                }
+
+                if (this.get("active")) {
+                    self.$el.focus();
+                    this.set("active", true);
+                }
+            } else {
+                this.name = this.id;
+                this.type = "radio";
+                this.$wrap = $("input[name=" + this.name + "]:first").parents(".wrapper-input");
+            }
+
+            var val = this.getValue();
+
+            this.set({
+                "value": val,
+                "initValue": val,
+                "lastValue": val
+            }, {silent:false});
+        },
+
+        ajaxValidation: function() {
+            var self = this,
+                value = this.getValue(),
+                data = {},
+                params = {
+                    dataType: "json"
+                };
+
+            data[this.name] = value;
+
+            if (typeof this.attributes.validationData == "function") {
+                extend(data, this.attributes.validationData(this.collection));
+            }
+
+            return Sync(this.attributes.validationURL).update(data, params)
+                .success(function(data) {
+                    if (typeof data._success == "undefined") {
+                        return;
+                    }
+
+                    if (data._success === true) {
+                        self.set("status", "success");
+                    } else {
+                        if (data._reason && data._reason.length > 0) {
+                            var reasons = [];
+                            for (var i=0, reason; reason=data._reason[i]; i++) {
+                                reasons.push(reason.message);
+                            }
+                            self.set("errors", reasons);
+                        }
+                        self.set("status", "error");
+                    }
+                })
+                .error(function() {
+                    //alert("error");
+                });
+        },
+
+        getValue: function(){
+            switch(this.type) {
+                case "checkbox":
+                    return this.$el.is(":checked");
+                    break;
+
+                case "radio":
+                    return $("input[name=" + this.id + "]:checked").val();
+                    break;
+
+                default:
+                    var value = this.$el.val();
+                    return value ? value : "";
+            }
+        },
+
+        hasChanged: function() {
+            return (this.getValue() != this.get("initValue"));
+        },
+
+        inputValidation: function(e) {
+            var self = this,
+                value = this.getValue();
+
+            if (!value) {
+                return;
+            }
+            if (!this.attributes.validate) {
+                this.ajaxValidation();
+            } else {
+                this.attributes.validate.call(this);
+            }
+        },
+
+        removeErrorIfNotEmpty: function() {
+            if (this.value != "") {
+                this.set("status", "success");
+            }
+        },
+
+        updateInitValue: function() {
+            this.set("initValue", this.getValue());
+        }
+    });
+
+
+    /*
+     * Setup the collection of models
+     */
+    var inputs = Base.Collection.extend({
+        submitted: false,
+
+        model: input,
+
+        initialize: function() {
+            this.totalErrors = 0;
+        },
+
+        recordStatusChange: function(model) {
+            var status = model.get("status"),
+                prevStatus = model._previousAttributes.status;
+
+            if (status == "error-soft") {
+                return;
+            }
+            else if (status == "error") {
+                this.totalErrors++;
+            }
+            else if (prevStatus) {
+                this.totalErrors--;
+            }
+        },
+
+        updateInitValues: function() {
+            for (var id in this._byId) {
+                this.getById(id).updateInitValue();
+            }
+        }
+    });
+
+
+
+    Base.FormHandler = Base.Controller.extend({
+        method: "update",
+
+        useAjaxFieldValidation: true,
+
+        initialize: function(config) {
+            var self = this;
+
+            this.view = new view(this);
+
+            var collection = new inputs(this);
+
+            collection.model.prototype
+                .bind("change:status", this.view.toggleStatus)
+                .bind("change:status", collection.recordStatusChange, collection)
+                .bind("change:errors", this.view.setErrorMessage, this.view);
+
+            this.bindEvents({
+                "submit": "_submit",
+                "press .submit": "_submit",
+                "press .cancel": "cancel",
+                "press .alert-message .close": "closeMessage"
+            });
+
+            if (this.highlightLabels) {
+                $("input,select,textarea", this.$el)
+                    .live("focus", function(e){
+                        view.prototype.setActive( $(this) );
+                    })
+                    .live("blur", function(e){
+                        view.prototype.setInactive( $(this) );
+                    });
+            }
+
+            // Changes the provided `inputs` property into an accessible collection
+            this.inputs = collection.add(this.inputs, {silent:true});
+            if (!this.formData) {
+                this.formData = this._formData;
+            }
+
+            this.init(config);
+        },
+
+        init: function(config) {},
+
+        closeMessage: function() {
+            this.view.hideTopLevelErrors();
+        },
+
+        _formData: function(options) {
+            options = options || {};
+            var getAllFields = options.fields != "changed" || false;
+
+            var data = {},
+                id,
+                model,
+                total = 0;
+
+            for (id in this.inputs._byId) {
+                model = this.inputs.getById(id);
+
+                if (getAllFields || model.attributes.persist || model.hasChanged()) {
+                    data[model.name] = model.getValue();
+                    total++;
+                }
+            }
+
+            $("input[type=hidden]", this.$el).each(function(){
+                var $this = $(this);
+                data[$this.attr("name")] = $this.val();
+            });
+
+            return total ? data : false;
+        },
+
+        cancel: function() {
+            this.$el[0].reset();
+        },
+
+        _submit: function() {
+            var formData = this.formData();
+
+            if (!formData) {
+                return false;
+            }
+
+            if (this.submit) {
+                if (this.submit(formData)) {
+                    this.ajaxSubmit(formData);
+                }
+            } else {
+                this.ajaxSubmit(formData);
+            }
+        },
+
+        ajaxSubmit: function(formData) {
+            var self = this;
+
+            if (this._submitInProcess) {
+                return;
+            }
+
+            this._submitInProcess = true;
+            this.inputs.submitted = true;
+            this.inputs.formErrors = false;
+
+            return self.sync[self.method](formData)
+                .success(function(data, textStatus, jqXHR) {
+                    if (SU.Captcha.isRequired(data)) {
+                        self._submitInProcess = false;
+                        self.inputs.submitted = false;
+                        SU.Captcha.show(function(){
+                            self.ajaxSubmit(formData);
+                        });
+                        return;
+                    }
+
+                    self._submitInProcess = false;
+                    if (data._success === true && self.success) {
+                        self.inputs.updateInitValues();
+                        self.success(data, textStatus, jqXHR);
+                    }
+                    else if (self.failure) {
+                        self.failure(data, textStatus, jqXHR);
+                    }
+                    else {
+                        self.inputs.totalErrors = 0;
+
+                        if (data._reason) {
+                            if (Utils.isArray(data._reason)) {
+                                var reasons = [];
+                                for (var i=0, reason; reason=data._reason[i]; i++) {
+                                    if (reason.meta && reason.meta.field) {
+                                        var model = self.inputs.getById(reason.meta.field);
+                                    }
+                                    if (model) {
+                                        model.set("status", "error");
+                                        model.set("errors", reason.message);
+                                    } else {
+                                        reasons[reasons.length] = reason.message;
+                                    }
+                                }
+                                self.inputs.formErrors = reasons;
+                                self.view.showTopLevelErrors(self.inputs);
+                            }
+                        }
+                    }
+                })
+                .error(function(jqXHR, textStatus, errorThrown) {
+                    self._submitInProcess = false;
+                    if (self.error) {
+                        self.error(jqXHR, textStatus, errorThrown);
+                    }
+                });
+        }
+    });
+}).call(this);/**
+ * su_extensionapi_webtb.js
+ *
+ * Implements the suExtensionApi for the webtb
+ */
+(function() {
+    SU.SuExtensionApiWebTb = function() {
+        this.message._listeners = [];
+    };
+
+    SU.SuExtensionApiWebTb.prototype = {
+        // -------------------------------------------------------------------
+        // Extension information
+        // -------------------------------------------------------------------
+        _info: { apiVersion: "1.0",    provider: "webtb", _providerVersion: "1.0" },
+        id: 1,
+
+        getProviderInfo: function(callback) {
+            callback(this._info);
+        },
+
+        isReady: function() { return true; },
+
+        // -------------------------------------------------------------------
+        // Message functionality
+        // -------------------------------------------------------------------
+        message: {
+            addListener: function(fnListener/*function(messageId, data, sender) { }*/) {
+                this.removeListener(fnListener);
+                this._listeners.push(fnListener);
+            },
+
+            removeListener: function(fnListener) {
+                for(var i=0; i<this._listeners.length; i++)
+                {
+                    if(this._listeners[i] === fnListener)
+                    {
+                        this._listeners.splice(i, 1);
+                        return;
+                    }
+                }
+            },
+
+            broadcastMessage: function(messageId, data) {
+                this.postMessage(null, messageId, data);
+            },
+
+            postMessage: function(target, messageId, data) {
+                for(var i=0; i<this._listeners.length; i++)
+                {
+                    this._listeners[i](messageId, data, null);
+                }
+            }
+        },
+
+        // -------------------------------------------------------------------
+        // Overlay functionality
+        // -------------------------------------------------------------------
+        overlay: {
+            opener: null, /* always null for webtoolbar */
+            /*
+            _overlayPrototype: {
+                opener: null,
+
+                close: function() {},
+                getPosition: function(callback) {},
+                setPosition: function(position) {}
+                // position is of the form { left: n, top: n, width: n, height: n }
+            },
+            */
+            create: function(url, options, callback /*function (overlay)*/) {},
+
+            destroy: function(id) {
+                suExtensionApi.message.postMessage(null, 'overlayClose', id);
+            }
+        }
+    };
+
+    SU.addInit("mSuExtensionApiWebTb", function(data) {
+        if (typeof suExtensionApi != "undefined")
+            return;
+        try {
+            if (typeof top.suExtensionApi != "undefined")
+                suExtensionApi = top.suExtensionApi;
+            else
+                suExtensionApi = top.suExtensionApi = new SU.SuExtensionApiWebTb;
+        } catch(ex) {}
+    });
+}).call(this);(function(){
+    $.fn.handleTabs = function( options ) {
+        var $tabs = this.find('li'),
+            $tabContent = $(options.tabContent),
+            $targ;
+        // change active tab on click
+        this.click( function( e ) {
+            e.preventDefault();
+            $targ = $(e.target);
+            if( $targ.is('a') && !$targ.parent().hasClass('disabled')) {
+                $tabs.removeClass('active');
+                $targ.parent().addClass('active');
+                $tabContent.find('.active').removeClass('active');
+                $($targ.attr('href')).addClass('active');
+            }
+        });
+    };
+    SU.addInit("tabSwitchInit", function(config){
+        $(config.tabWrapper).handleTabs(config);
+    });
+}).call(this);(function(){
+    SU.Overlay = {
+        _doCheckResize: function(data) {
+            var h = $body.height();
+            if (h > data.max)
+                h = data.max;
+            if (h != $win.height())
+            	SU.ToolbarAction.resizePanel({id: data.id, size: {height: h}});
+        },
+
+        resizePanel: function(data) {
+            // Resize it now
+            this._doCheckResize(data);
+            // And Resize again after the window is fully loaded (if it hasn't already)
+            var me = this;
+            $(window).load(function() {
+                me._doCheckResize(data);
+            });
+        },
+
+        onResize: function() {
+            var el = $('.safari-overlay .overlay-scrolling-content');
+            if (el.length) {
+                var outerHeight = el.outerHeight() - el.height();
+                el.height(document.documentElement.offsetHeight - el.offset().top - outerHeight);
+            }
+        }
+    };
+
+    SU.addInit("mOverlays", function(){
+        $('.close-overlay-btn').bind("click", function(e){
+            e.preventDefault();
+            if ($(this).data('sendmessageoverlay') == 'yes'
+                && typeof suExtensionApi != 'undefined' && suExtensionApi.message)
+            {
+                var dname = $(this).data('messageoverlaydata');
+                var data = SU.Data[dname];
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'showMessageOverlay', data);
+            }
+            //todo: remove this autoshared message crap in a bit..added in on 02/02
+            if ($(this).data('autosharepopupoptout') == 'yes')
+            {
+                var data = {};
+                data.token = $(this).data('xsstoken');
+                data.targetlink = $(this).data('targetlink');
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'autosharepopupoptout', data);
+            }
+            if ($(this).data('hidetoolbar') == 'yes')
+            {
+                var data = { 
+                    hidePermanent: $('#hidetoolbarperm').is(':checked')
+                };
+                data[SU.hideToolbarData.tokenName] = SU.hideToolbarData.tokenVal;
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'hideToolbar', data);
+            }
+            var overlayId = $(this).data('overlayname');
+            if (!overlayId) {
+                // Get it from the extension api
+                if(suExtensionApi && suExtensionApi.overlay && suExtensionApi.overlay.opener)
+                    overlayId = suExtensionApi.id;
+            }
+            SU.ToolbarAction.closeOverlay(overlayId);
+        });
+        $(window).resize(function() {
+            SU.Overlay.onResize();
+        });
+        $(window).load(function() {
+            window.setTimeout(function() {
+                SU.Overlay.onResize();
+            });
+        });
+    });
+    SU.addInit("mOverlayResize", function(data){
+        $(function() {
+            SU.Overlay.resizePanel(data);
+        });
+    });
+    SU.hideToolbarData = {};
+    SU.addInit("mHideToolbarPopup", function (data) {
+        SU.hideToolbarData.tokenName = data.tokenName;
+        SU.hideToolbarData.tokenVal = data.tokenVal;
+    });
+    SU.Data = {};
+    SU.addInit("mMessageOverlayOnClose", function(data){
+        for (k in data) {
+            SU.Data[k] = data[k];
+        }
+    });
+}).call(this);(function(){
+    Base.TagComplete = {};
+
+    var instance = 1;
+
+    Base.TagComplete.View = Base.View.extend({
+        _resultsOpen: false,
+
+        initialize: function() {
+            this.idPrefix = "tag-" + (instance++) + "-";
+            this.$wrap = this.$el.parents(".wrapper-input");
+            this.$inputWrap = this.$el.find(".tag-complete-input");
+            this.$input = this.$inputWrap.find("input");
+            $body.append('<ul class="tc-results" id="' + this.idPrefix + '"results" style="display:none"></ul>');
+            this.$results = $(".tc-results");
+            this.$errorMsg = this.$wrap.find(".help-block .s-error:first");
+        },
+
+        getElementId: function(model) {
+            return this.idPrefix + model.get("number");
+        },
+
+        add: function(tags, model) {
+            var tag = model.get("tag"),
+                id = this.getElementId(model);
+
+            this.$wrap.removeClass("error");
+            this.$inputWrap.before("" +
+                "<li id='" + id + "' class='tc-entry'>" +
+                    "<span>" + tag + "&nbsp;<a href='#' data-id='" + model.id + "' class='tc-close'>&times;</a></span>" +
+                "</li>");
+        },
+
+        remove: function(tags, model) {
+            this.$el.find("#" + this.idPrefix + model.get("number")).remove();
+        },
+
+        displayError: function(message) {
+            if (typeof message == "string") {
+                this.$errorMsg.html(message);
+            } else {
+                this.$errorMsg.html( this.$errorMsg.data("original") );
+            }
+
+            this.$wrap.addClass("error");
+        },
+
+        highlight: function(model) {
+            var id = this.getElementId(model),
+                $id = this.$el.find("#" + id);
+
+            $id.animate({opacity:.25}, 300, function(){
+                $id.animate({opacity:1}, 300);
+            });
+        },
+
+        renderResults: function(results) {
+            if (results.models.length > 0) {
+                var html = [],
+                    h = 0;
+
+                for (var i=0, result; result=results.models[i]; i++) {
+                    html[h++] = '<li class="tc-result' + (i === 0 ? ' s-active' : '') + '">';
+                    html[h++] = '<a href="#" data-index="' + i + '">' + result.get("display") + '</a>';
+                    html[h++] = '</li>';
+                }
+
+                this.$results.html( html.join("") );
+                this.positionResults();
+                this.showResults();
+            } else {
+                this.hideResults();
+                this.$results.html("");
+            }
+        },
+
+        positionResults: function() {
+            var pos = this.$input.offset();
+
+            this.$results.css({
+                left: pos.left,
+                top: (pos.top + 24)
+            });
+        },
+
+        highlightResult: function(state) {
+            var index = state.getInt("index");
+            var $liCollection = this.$results.find("li").removeClass("s-active");
+
+            $( $liCollection.get(index) ).addClass("s-active");
+        },
+
+        showResults: function() {
+            this._resultsOpen = true;
+            this.$results.show();
+            return this;
+        },
+
+        hideResults: function() {
+            this._resultsOpen = false;
+            this.$results.hide();
+            return this;
+        }
+    });
+
+
+    Base.TagComplete.Tag = Base.Model.extend();
+    Base.TagComplete.Tags = Base.Collection.extend({
+        model: Base.TagComplete.Model,
+        number: 0
+    });
+
+
+    Base.TagComplete.Result = Base.Model.extend({
+        idAttribute: "index"
+    });
+    Base.TagComplete.Results = Base.Collection.extend({
+        model: Base.TagComplete.Result
+    });
+
+
+
+    Base.TagComplete.Controller = Base.Controller.extend({
+        _view: Base.TagComplete.View,
+        _tags: Base.TagComplete.tags,
+        _results: Base.TagComplete.Results,
+
+        initialize: function(config) {
+            var self = this;
+            this.$el = $(config.selector);
+            this.$input = this.$el.find(".tag-complete-input input");
+            this.view = new this._view(this);
+            this.tags = new this._tags(this);
+            this.results = new this._results(this);
+
+            this.tags
+                .bind("add", this.view.add, this.view)
+                .bind("remove", this.view.remove, this.view);
+
+
+            this.bindEvents({
+                "press": "focus"
+            });
+
+            this.bindEvents(this.tags, {
+                "press .tc-close": "remove"
+            });
+
+
+            this.results.bind("reset", this.view.renderResults, this.view);
+
+
+            this.$input
+                .bind("focus", function(e){
+                    self.$el.addClass("s-active");
+                })
+                .bind("keyup", function(e){
+                    self.keyup(e);
+                })
+                .bind("keydown", function(e){
+                    self.keydown(e);
+                })
+                .bind("blur", function(e){
+                    self.blur(e);
+                });
+
+
+            this.state = new Base.Model({
+                "index": 0
+            });
+
+            this.state.bind("change:index", this.view.highlightResult, this.view);
+
+
+            this.view.$results
+                .on("click", "a", function(e){
+                    e.preventDefault();
+                    self.resultSelected( parseInt( $(this).data("index"), 10 ) );
+                })
+                .on("hover", "a", function(e){
+                    self.setIndex( parseInt( $(this).data("index"), 10 ) );
+                });
+
+            this.init(config);
+        },
+
+        init: function(config) {},
+
+        focus: function($this, e) {
+            this.$el.addClass("s-active");
+            this.$input.focus();
+        },
+
+        getInputValue: function() {
+            var value = this.$input.val();
+
+            return value.length > 0 ? value : false;
+        },
+
+        blur: function(e) {
+            if (this._blurTimeout) {
+                clearTimeout(this._blurTimeout);
+            }
+
+            var self = this;
+            this._blurTimeout = setTimeout(function(){
+                var value = self.getInputValue();
+
+                if (value) {
+                    self.add(value);
+                }
+
+                else if (self.tags.models.length === 0) {
+                    self.$el.removeClass("s-active");
+                }
+
+                self.results.reset();
+            }, 400); // Give the click event from the results at least 300ms to register
+        },
+
+        keydown: function(e) {
+            if (e.which == 9) { // Tab (can only be captured in keydown
+                var value = this.getInputValue();
+
+                if (this.view._resultsOpen) {
+                    e.preventDefault();
+                    this.resultSelected();
+                }
+
+                else if (value) {
+                    e.preventDefault();
+                    this.add(value);
+                }
+            }
+
+            else if (e.which == 38 /*Up*/ || e.which == 40 /*Down*/) {
+                e.preventDefault();
+            }
+        },
+
+        keyup: function(e) {
+            var value = this.getInputValue();
+
+            if (value) {
+                this._backspacePressed = 0;
+
+                if (value.indexOf(",") > -1) {
+                    this.add( value.replace(",", "") );
+                }
+            }
+
+            // A `switch` statement would require duplicate code, trying to keep it DRY.
+            if (e.which == 13) { //Enter
+                e.preventDefault();
+                if (this.view._resultsOpen) {
+                    this.resultSelected();
+                }
+
+                else if (value) {
+                    this.add(value);
+                }
+                return;
+            }
+
+            if (e.which == 8 && !value) { // Backspace & empty input
+                if (this._backspacePressed++ == 1) { // Make the user hit backspace twice before deleting tags
+                    this._backspacePressed = 0; // Reset
+                    // Remove the last tag
+                    if (this.tags.models.length > 0) {
+                        this.tags.remove( this.tags.models[ this.tags.models.length - 1 ] );
+                    }
+                }
+
+                this.results.reset();
+                return;
+            }
+
+            else if (e.which == 27) { // Esc
+                this.results.reset(); // Hide results
+                return;
+            }
+
+            var index = this.state.getInt("index");
+
+            if (e.which == 38 /*Up*/) {
+                e.preventDefault();
+                if (index > 0) {
+                    this.state.setInt("index", (index - 1) );
+                }
+                return;
+            }
+            if (e.which == 40 /*Down*/) {
+                e.preventDefault();
+                if (index !== this._lastIndex) {
+                    this.state.setInt("index", (index + 1) );
+                }
+                return;
+            }
+
+            if (value) {
+                var matches = this.getMatches(value);
+                if (matches) {
+                    this._lastIndex = this.results.models.length - 1;
+                    this.state.setInt("index", 0, {silent:true});
+                }
+            } else {
+                this.results.reset();
+            }
+        },
+
+        add: function(result) {
+            if (!result) {
+                return;
+            }
+
+            var value,
+                tag;
+
+            if (result instanceof Base.Model) {
+                value = result.get("value");
+                tagDisplay = result.get("tag");
+            } else {
+                value = result;
+                tagDisplay = result;
+            }
+
+
+            var tag = this.tags.getById(value);
+
+            if (!tag) {
+                this.tags.add({
+                    "id": value,
+                    "value": value,
+                    "tag": tagDisplay,
+                    "number": this.tags.number + 1
+                }, {silent:false});
+
+                if ( this.tags.getById(value) ) { // See if the value has been added
+                    this.$input.val('');
+                    this.tags.number++;
+                }
+            } else {
+                this.view.highlight(tag);
+            }
+        },
+
+        remove: function(model, e) {
+            e.stopPropagation();
+            this.tags.remove(model);
+            this.$input.focus();
+        },
+
+
+        getMatches: function(value) {
+            var matches = this._getMatches(value);
+
+            if (matches.length > 0) {
+                // Sort by the match score (descing order)
+                matches = matches.sort( function(a, b) {
+                    return parseFloat(b.score) - parseFloat(a.score);
+                }).slice(0, 10); // return a max of 10 results
+
+                // Apply the index to the sequential index order to the results to be displayed
+                for (var i=0, match; match=matches[i]; i++) {
+                    matches[i].index = i; // index is used in the .getById method for the results collection
+                }
+
+                this.results.reset(matches);
+                return true;
+            } else {
+                this.results.reset();
+                return false;
+            }
+        },
+
+        resultSelected: function(data) {
+            var result = null;
+
+            switch( typeof data ) {
+                case "object":
+                    result = data;
+                    break;
+
+                case "number":
+                    result = this.results.models[data];
+                    break;
+
+                default: // typeof = undefined
+                    result = this.results.models[ this.state.getInt("index") ];
+            }
+
+            this.add(result);
+
+            this.results.reset();
+
+            if (this._blurTimeout) {
+                clearTimeout(this._blurTimeout);
+            }
+        },
+
+        setIndex: function(index) {
+            this.state.setInt("index", index);
+        }
+    });
+}).call(this);(function(){
+    var _totalEmails = 0,
+        _usernames = {};
+
+    var view = Base.TagComplete.View;
+
+    var contact = Base.TagComplete.Tag.extend({
+        initialize: function(){},
+
+        validate: function() {
+            var value = this.get("value"),
+                valid = false;
+
+            var usernamePattern = /^[a-zA-Z][a-zA-Z0-9-_\.]{1,16}$/;
+
+            if (usernamePattern.test(value)){
+                this.attributes.type = "username";
+
+                // Make sure the username is a valid contact
+                if (_usernames[value]) {
+                    valid = true;
+                } else {
+                    this.trigger("error-msg", "You may only share with a StumbleUpon member you are connected to.");
+                }
+            }
+
+            // crude email matching, an acurate regex for email is too verbose for here
+            else if (value.indexOf("@") > -1 && value.indexOf(".") > -1 && value.length > 5) {
+                this.attributes.type = "email";
+
+                valid = (_totalEmails < 11); // Limit to 10 emails
+
+                if (valid) {
+                    _totalEmails++;
+                } else {
+                    this.trigger("error-msg", "You may only share with 10 email addresses at a time.");
+                }
+            }
+
+            else {
+                this.trigger("error-msg");
+            }
+
+            return valid;
+        }
+    });
+
+    var contacts = Base.TagComplete.Tags.extend({
+        model: contact,
+        _totalEmails: 0,
+
+        removeTag: function(self, contacts, contact, options) {
+            if (contact.get("type") == "email") {
+                _totalEmails--;
+            }
+        },
+
+        toJSON: function() {
+            var data = {
+                usernames: [],
+                emails: []
+            };
+
+            for (var i =0, contact; contact=this.models[i]; i++) {
+                data[ contact.get("type") + "s"].push( contact.get("value") );
+            }
+
+            return data;
+        }
+    });
+
+
+    ShareTagComplete = Base.TagComplete.Controller.extend({
+        _view: view,
+        _tags: contacts,
+
+        init: function(config) {
+            this.tags.model.prototype.bind("error-msg", this.invalidInput, this);
+            this.tags.bind("remove", this.tags.removeTag, this.tags)
+
+            this._searchData = [];
+            this._cache = {};
+            this._cacheByKeywordLength = {};
+            this._cacheMaxKeywordLength = 1;
+            this._lastKeyword = null;
+
+            if (!config.data) {
+                return;
+            }
+
+            if (config.data.contacts) {
+                for (var i=0, entry; entry=config.data.contacts[i]; i++) {
+                    entry.value = entry.username;
+                    entry.isEmail = false;
+                    this._searchData.push(entry);
+                    _usernames[entry.username] = true; // Array.indexOf is not supported in IE < 9, fall back to object index
+                }
+            }
+
+            if (config.data.emails) {
+                for (var i=0, entry; entry=config.data.emails[i]; i++) {
+                    entry.hasName = entry.name && entry.name.length > 0;
+                    entry.value = entry.email;
+                    entry.isEmail = true;
+
+                    this._searchData.push(entry);
+                }
+            }
+        },
+
+        getData: function(keyword) {
+            /*
+             * Using a method here in case we ever want to implement caching of results by starting
+             * character & length, etc..
+             */
+            return this._searchData;
+        },
+
+        _getMatches: function(keyword) {
+            var data = this.getData(keyword);
+
+            if (data.length === 0) {
+                return [];
+            }
+
+            var pattern = keyword.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\$&"), // "\\$&" caused problems with matching
+                regexObj = new RegExp("^" + pattern, "i"),
+                wordsEntered = pattern.split(" ");
+                matches = [],
+                wordRegex = [];
+
+            for (var w=0, word; word=wordsEntered[w]; w++) {
+                wordRegex[w] = new RegExp("^" + word, "i");
+            }
+
+            for (var i=0, entry; entry=data[i]; i++) {
+                var charactersMatched = 0,
+                    wordsMatched = 0,
+                    finalScore = 0,
+                    tag = null,
+                    display = null;
+
+                if (entry.isEmail) {
+                    if (entry.hasName) {
+                        var nameSegments = entry.name.split(" "),
+                            email = entry.email,
+                            nameLength = entry.name.replace(" ", "").length;
+
+                        nameSegmentLoop:
+                        for (var s=0,segment; segment=nameSegments[s]; s++) {
+                            wordRegexLoop:
+                            for (var r=0, wrd; wrd=wordRegex[r]; r++) {
+                                if ( wrd.test(segment) ) {
+                                    wordsMatched++;
+
+                                    charactersMatched += wordsEntered[r].length;
+                                    nameSegments[s] = segment.replace(wrd, "<strong>$&</strong>");
+                                }
+                            }
+                        }
+
+                        if (wordsMatched == wordsEntered.length) {
+                            finalScore = (charactersMatched / nameLength) * 100;
+                        } else {
+                            if ( regexObj.test(entry.email) ) {
+                                email = entry.email.replace(regexObj, "<strong>$&</strong>");
+
+                                finalScore = (pattern.length / entry.email.length) * 100;
+                            }
+                        }
+
+                        display = "&quot;" + nameSegments.join("&nbsp;") + "&quot;&nbsp;&lt;" + email + "&gt;";
+                        tag = entry.name;
+                    }
+                    else if ( regexObj.test(entry.email) ) {
+                        display = entry.email.replace(regexObj, "<strong>$&</strong>");
+                        tag = entry.email;
+                        finalScore = (pattern.length / entry.email.length) * 100;
+                    }
+                }
+
+                // Username contact, no email
+                else {
+                    if ( regexObj.test(entry.username) ) {
+                        display = entry.username.replace(regexObj, "<strong>$&</strong>");
+                        tag = entry.username;
+                        finalScore = (pattern.length / entry.username.length) * 100;
+                    }
+                }
+
+                if (finalScore > 0) {
+                    matches.push({
+                        display: display,
+                        tag: tag,
+                        value: entry.value,
+                        score: finalScore
+                    });
+                }
+            }
+
+            return matches;
+        },
+
+
+        getContacts: function() {
+            return this.tags.toJSON();
+        },
+
+        invalidInput: function(model, message) {
+            this.view.displayError(message);
+        }
+    });
+
+
+    SU.addInit("mShareTagComplete", function(config){
+        SU.ShareTagComplete = new ShareTagComplete(config);
+    });
+}).call(this);/**
+ * toolbar_action.js
+ *
+ * Facade to send calls to the toolbars
+ *
+ * @author fabrice
+ */
+(function(){
+    SU.ToolbarAction = {
+
+        _hasCorrectExtension: function() {
+            if (typeof suExtensionApi == "undefined") {
+                return false;
+            }
+
+            var info = suExtensionApi._info;
+            if (!info) {
+                return false;
+            }
+
+            if ($.inArray(info.provider, ["webtb", "ios", "android"]) > -1) {
+                return true;
+            }
+
+            if ((info.provider == "chromebar") && (parseInt(info._providerVersion) >= 4)) {
+                return true;
+            }
+
+            return false;
+        },
+
+        _getWebTb: function() {
+            if (SU.WebToolbar) {
+                return SU.WebToolbar;
+            } else if (top.SU && top.SU.WebToolbar) {
+                return top.SU.WebToolbar;
+            }
+            return null;
+        },
+
+        _getChromebar: function() {
+            try {
+                var el = document.getElementById("__su__tbcont");
+                if(el) {
+                    return el.contentWindow;
+                }
+            } catch (err) {}
+            return null;
+        },
+
+        _convertModeToChromebar: function(mode) {
+            // Copy the existing mode, then change it
+            var modeCopy = jQuery.extend({}, mode);
+            var chromebar_mode = {mode: modeCopy};
+            chromebar_mode.mode.method = mode.mode;
+            if (chromebar_mode.mode.method == 'videos'){chromebar_mode.mode.method = 'video';}else if (chromebar_mode.mode.method == 'photos')
+            {
+                chromebar_mode.mode.mode   = 'topic';
+                chromebar_mode.mode.method = 'topic';
+                chromebar_mode.mode.topic  = 302;
+            }
+            delete chromebar_mode.mode.mode;
+            if (mode.contextual)
+            {
+                chromebar_mode.label = mode.contextual;
+            }
+            return chromebar_mode;
+        },
+        /**
+         * Tell the toolbar to start stumbling.
+         * if mode is null, the current mode is not changed
+         * if a nextpid is given, the mode (if not null) will change
+         * but the next displayed stumble is the nextpid given
+         * nextpid can also be passed as a property in the mode object (precedence to the second arg)
+         */
+        stumble: function(mode, nextpid) {
+            if (!nextpid && mode != null && typeof mode.nextpid != 'undefined'){nextpid = mode.nextpid;}
+
+            // Check if mozbar installed
+            if (typeof suExtensionApi != 'undefined' && suExtensionApi.getProviderInfo)
+            {
+                suExtensionApi.getProviderInfo(function(info){providerInfo = info;});
+                if (providerInfo.provider == "mozbar")
+                {
+                    if (mode != null)
+                    {
+                        // The old mozbar has slightly different mode formats
+                        if (providerInfo.apiVersion == "1.0")
+                        {
+                            mode.method = mode.mode;
+                            if (mode.mode == 'stumblethru'){mode.domain = mode.partner;}
+                            if (mode.mode == 'topic'){mode.topicid = mode.topic;}
+                            if (mode.mode == 'tag'){mode.tag = mode.q;}
+                            if (mode.mode == 'instumbler' && mode.stumblername){mode.stumbler = mode.stumblername + '';} // We need to be sure we have a string and not a number here
+                            if (mode.mode == 'stumblelist') {mode.listid = mode.s_prefixed_listid.substring(1);}
+
+                            if (mode.mode == 'photos')
+                            {
+                                mode.method  = 'topic';
+                                mode.topicid = 302;
+                            }
+                            if (mode.mode == 'all'){mode.method = 'general';}
+                            if (mode.mode == 'videos'){mode.method = 'video';}
+                            if (mode.mode == 'channels'){mode.method = 'channel';}
+                        }
+                        suExtensionApi.stumble.setMode(mode);
+                    }
+
+                    if (nextpid)
+                    {
+                        try {
+                            window.top.location.href = '/su/' + nextpid;
+                            return true;
+                        } catch (err) {}
+                        window.location.href = '/su/' + nextpid;
+                    } else {suExtensionApi.stumble.stumble();}
+                    return true;
+                }
+                else if (providerInfo.provider == "chromebar")
+                {
+                    if (mode == null && suExtensionApi.stumble)
+                    {
+                        suExtensionApi.stumble.stumble();
+                        return true;
+                    }
+
+                    // todo:  Why is this necessary?  Something seems whack
+                    delete mode.stumblername;
+
+                    // New toolbars directly support stumble functionality
+                    suExtensionApi.stumble.setMode(mode, function() {
+                        if (nextpid)
+                        {
+                            try {
+                                window.top.location.href = '/su/' + nextpid;
+                            } catch (err) {}
+                            window.location.href = '/su/' + nextpid;
+                        } else {suExtensionApi.stumble.stumble();}
+                    });
+                    return true;
+                }
+                else if (providerInfo.provider == "ios" || providerInfo.provider == "android")
+                {
+                    if (mode)
+                    {
+                        switch (mode.mode)
+                        {
+                            case 'instumbler':
+                                mode.mode    = 'user';
+                                mode.userids = [ mode.stumbler ];
+                                break;
+
+                            case 'stumblethru':
+                                mode.mode    = 'domain';
+                                mode.domains = [ mode.partner ];
+                                break;
+
+                            case 'tag':
+                                mode.mode    = 'keyword';
+                                mode.keyword = mode.q;
+                                break;
+
+                            case 'topic':
+                                mode.mode      = 'interest';
+                                mode.interests = [ mode.topic ];
+                                break;
+
+                            case 'friends':
+                                mode.mode = 'following';
+                                break;
+
+                            case 'related_url':
+                                mode.url = mode.related_url;
+                                break;
+
+                            case 'videos':
+                                mode.mode      = 'video';
+                                mode.interests = [ mode.topic ];
+                                mode.domains   = [ mode.partner ];
+                                break;
+                        }
+                    }
+                }
+            }
+
+            if (mode != null){delete mode.stumblername;}
+
+            // Check if webtb suExtensionApi present
+            if (this._hasCorrectExtension())
+            {
+                if (mode){suExtensionApi.message.broadcastMessage('externalModeSelect', mode);}
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'stumbleNow', true);
+                return true;
+            }
+
+            // Check if webtoolbar installed without suExtensionApiWebTb instantiated
+            var _webtb = this._getWebTb();
+
+            if (_webtb)
+            {
+                try
+                {
+                    if (mode)
+                    {
+                        _webtb.setStumblingMode(mode);
+                        if (mode.contextual){_webtb.setModeLabel(mode.contextual);}
+                    }
+                    _webtb.performStumble(null, nextpid);
+                    return true;
+                }
+                catch (err) {
+                }
+            }
+
+            // We fallback to a basic link because we don't have any toolbar installed
+            return this._stumblelink(mode, nextpid);
+        },
+
+        _stumblelink: function(mode, nextpid) {
+            var stumblelink = '/to/stumble/go';
+            if (mode)
+            {
+                switch (mode.mode)
+                {
+                case 'topic':
+                    if (mode.topic){stumblelink = '/to/stumble/topic:' + mode.topic;}
+                    break;
+                case 'videos':
+                case 'news':
+                case 'photos':
+                case 'friends':
+                    stumblelink = '/to/stumble/metatopic:' + mode.mode;
+                    break;
+                case 'instumbler':
+                    if (mode.stumbler){stumblelink = '/to/stumble/stumbler:' + mode.stumbler;}
+                    break;
+                case 'stumblethru':
+                    if (mode.partner){stumblelink = '/to/stumble/stumblethru:' + mode.partner;}
+                    break;
+                case 'tag':
+                    if (mode.q){stumblelink = '/to/stumble/tag:' + mode.q;}
+                    break;
+                case 'stumblelist':
+                    // We use s_prefixed_listid because jquery data attributes are cast as floats for big numbers
+                    if (mode.s_prefixed_listid) {
+                        stumblelink = '/to/stumble/stumblelist:'+mode.s_prefixed_listid.substring(1);
+                    }
+                }
+            }
+
+            if (nextpid) {
+                stumblelink += ';pid=' + nextpid;
+            }
+            stumblelink += ';src=website';
+            if (nextpid && mode.m){stumblelink += '?m=' + encodeURIComponent(mode.m);}
+            try {
+                window.top.location.href = stumblelink;
+                return true;
+            } catch (err) {}
+            window.location.href = stumblelink;
+
+            return true;
+        },
+
+        _getFullPath: function(url) {
+            var ourOrigin,
+                regex,
+                match;
+            // Turn relative paths into full paths
+            if (url.match(/^https?:/))
+                return url;
+
+            // If it starts with '/', then append it to our domain
+            if (url.indexOf("/") === 0) {
+                regex = /^https?:\/\/[^\/]*/;
+                ourOrigin = document.location.href.match(regex)[0];
+                url = ourOrigin + url;
+                return url;
+            }
+
+            // It doesn't start with '/' or 'https?:', use the current path to build the url
+            regex = /(.*\/)/; // Greedily grab everything up to the last /
+            match = document.body.baseURI.match(regex);
+            url = match[0] + url;
+            return url;
+        },
+
+        rate: function(pid, rating) {
+            // Check if suExtensionApi present
+            if (this._hasCorrectExtension())
+            {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'rate', {pid: pid, rating: rating});
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    if (_webtb.currentStumble.publicid == pid
+                            && $.inArray(rating, [1, 0, -1]) != -1){_webtb.performRating(rating);}
+                }
+            }
+        },
+
+        subrate: function(pid, subrating) {
+            if (this._hasCorrectExtension())
+            {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener,
+                        'thumbDownMenu_subrate',
+                        {pid: pid, subrating: subrating});
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.onMessage('thumbDownMenu_subrate', {
+                        pid: pid,
+                        subrating: subrating
+                    }, null);
+                }
+            }
+        },
+
+        blocksite: function(pid, blocksite) {
+            if (this._hasCorrectExtension())
+            {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener,
+                        'thumbDownMenu_blocksite',
+                        {pid: pid, blocksite: blocksite});
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.onMessage('thumbDownMenu_blocksite', {
+                        pid: pid,
+                        blocksite: blocksite
+                    }, null);
+                }
+            }
+        },
+
+        showShare: function(sharePid, sharedUrl, webbarUrl) {
+            sharedUrl = this._getFullPath(sharedUrl);
+            webbarUrl = this._getFullPath(webbarUrl);
+            if (suExtensionApi && suExtensionApi.overlay && suExtensionApi.overlay.showUrlWithOverlay) {
+                var messageUrl = '/su/overlay/sharemsg?sharepid=' + encodeURIComponent(sharePid) + '&markseen=1';
+                messageUrl = this._getFullPath(messageUrl);
+                var options = {
+                    url: messageUrl,
+                    position: { top: 0, height: 40 },
+                    css: {
+                        "width": "100%",
+                        "box-shadow" : "2px 6px 6px rgba(0,0,0,0.2), -2px 6px 6px rgba(0,0,0,0.2)",
+                        "background-color" : "#F1F1EE"
+                    }
+                };
+                suExtensionApi.overlay.showUrlWithOverlay(sharedUrl, 'share-panel', options);
+            } else {
+                SU.ToolbarAction.navigate(webbarUrl);
+            }
+        },
+
+        openSharePanel: function(pid) {
+            if (this._hasCorrectExtension())
+            {
+                var info = suExtensionApi._info;
+                if (suExtensionApi.overlay.opener) {
+                    var target = suExtensionApi.overlay.opener;
+                } else if (info.provider == 'chromebar') {
+                    var target = document.getElementById('__su__toolbar').contentWindow.suExtensionApi;
+                }
+
+                suExtensionApi.message.postMessage(target, 'showSharePanel', {pid: pid});
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.showSharePanel(pid);
+                }
+            }
+        },
+
+        showShareMessageReply: function(pid) {
+            if (this._hasCorrectExtension())
+            {
+                if (suExtensionApi.message.postToCurrentBar) {
+                    suExtensionApi.message.postToCurrentBar('showShareMessageReply', pid);
+                } else {
+                    suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'showShareMessageReply', pid);
+                }
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.onMessage('showShareMessageReply', pid, null);
+                }
+            }
+        },
+
+        displayNotification: function(data) {
+            if (this._hasCorrectExtension())
+            {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'displayNotification', data);
+                return true;
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    try
+                    {
+                        _webtb.displayNotification(data);
+                    }
+                    catch (err)
+                    {
+                        return false;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        closeOverlay: function(data) {
+            if (this._hasCorrectExtension())
+            {
+                if (suExtensionApi.message.postToCurrentBar)
+                    suExtensionApi.message.postToCurrentBar('overlayClose', data);
+                else
+                    suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'overlayClose', data);
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.overlayManager.closeOverlay(data);
+                }
+            }
+        },
+
+        destroyOverlay: function(id) {
+            var _webtb;
+
+            if (this._hasCorrectExtension()) {
+                if (suExtensionApi.message.postToCurrentBar)
+                    suExtensionApi.message.postToCurrentBar('overlayDestroy', id);
+                else
+                    suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'overlayDestroy', id);
+            }
+            else {
+                _webtb = this._getWebTb();
+                if (_webtb)
+                    _webtb.overlayManager.destroyOverlay(id);
+            }
+        },
+
+        handleImplication: function(data) {
+            if (this._hasCorrectExtension()) {
+                    suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'handleImplication', data);
+            } else {
+                var _webtb = this._getWebTb();
+                if (_webtb) {
+                    _webtb.handleImplication(data);
+                }
+            }
+        },
+
+        implicationSubmit: function(response) {
+            if (this._hasCorrectExtension()) {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'implicationSubmit', response);
+            } else {
+                var _webtb = this._getWebTb();
+                if (_webtb) {
+                    _webtb.handleImplication(data);
+                }
+            }
+        },
+
+        resizePanel: function(data) {
+            if (this._hasCorrectExtension())
+            {
+                suExtensionApi.message.postMessage(suExtensionApi.overlay.opener, 'resizePanel', data);
+            }
+            else
+            {
+                var _webtb = this._getWebTb();
+                if (_webtb)
+                {
+                    _webtb.overlayManager.repositionOverlay(data.id, data.size);
+                }
+            }
+        },
+
+        navigate: function(url) {
+            // If there's no extension api then just navigate the top frame
+            if (!suExtensionApi || !suExtensionApi.litebar) {
+                window.top.location = url;
+                return;
+            }
+
+            // Convert it to a full path because relative paths don't mean anything in the extension api
+            url = this._getFullPath(url);
+            suExtensionApi.litebar.setContentLocation(url);
+        },
+
+        /**
+         * logs the toolbar in
+         * expects data to contain an array of data with the keys userid, hashedPassword and username
+         *
+         * currently this function only sure to work for mozbar
+         *
+         */
+        login: function(data) {
+            // Wait for the extension API to be available and ready
+            if((typeof(suExtensionApi) == "undefined") || !suExtensionApi.isReady())
+            {
+                // Wait for the script ready event
+                if (window.addEventListener){window.addEventListener("suScriptReadyExtensionApi", SU.ToolbarAction.doLogin(data), false);}else if (window.attachEvent){window.attachEvent("suScriptReadyExtensionApi", SU.ToolbarAction.doLogin(data));}
+            }
+            else
+            {
+                SU.ToolbarAction.doLogin(data);
+            }
+
+        },
+
+        /**
+         * This function actually does the login...currently works only with mozbar
+         *
+         */
+        doLogin: function(data) {
+            var do_login = 0, provider, version;
+            suExtensionApi.getProviderInfo(function(info){provider = info.provider;version=info.providerVersion;});
+            if (provider == 'mozbar' && parseFloat(version) >= 3.73){do_login = 1;}
+            if (do_login && typeof(suExtensionApi) != "undefined") {
+                suExtensionApi.message.broadcastMessage("msgLogin", data);
+                location.reload();
+            }
+        },
+
+        /**
+         * Sends the new list of topics for the currently logged in user to the toolbar
+         * @param topics: an object or an array.  If an object, then in the form:
+         *          { topicid: topicname, topicid: topicname, ...}
+         *          { 504: 'Photography', 21: 'Music', ...}
+         *
+         *      If an array then just an array of topic ids:
+         *          [ "38", "49", "224", ... ]
+         */
+        updateTopics: function(topics) {
+            try {
+                if (suExtensionApi && suExtensionApi.oldbar && suExtensionApi.oldbar.processCommands)
+                {
+                    var command = "UPDATETOPICS ";
+                    var isArray = (typeof(topics.length) != "undefined");
+                    for (var key in topics) {
+                        var topicId = isArray ? topics[key] : key;
+                        command += topicId + " ";
+                    }
+                    suExtensionApi.oldbar.processCommands(command);
+                }
+            } catch (err) {}
+        },
+
+        /**
+         * Invokes a callback when the extension api is ready
+         *
+         * @param callback: function(found)
+         *                  Invokes the callback with found=true if the extension API was found
+         *                  Invokes the callback with found=false if the wait timed out
+         * @param timeout:  ms to wait for the extension api before calling callback(false) if it is not found
+         */
+        waitForExtensionApi: function(callback, timeout) {
+            var finished = false;
+            if ((typeof(suExtensionApi) != 'undefined') && suExtensionApi.isReady()) {
+                callback(true);
+                return;
+            }
+
+            if (timeout) {
+                window.setTimeout(function() {
+                    if (!finished) {
+                        finished = true;
+                        callback(false);
+                    }
+                }, timeout);
+            }
+
+            window.addEventListener('suScriptReadyExtensionApi', function() {
+                if (!finished) {
+                    finished = true;
+                    callback(true);
+                }
+            }, false);
+        }
+    };
+
+    SU.addInit("toolbarLogin", function(data) {
+        SU.ToolbarAction.login(data);
+    });
+}).call(this);define(function(require) {
+    return {
+        setCaretPosition: function($el) {
+            var elem = $el.get(0),
+                caretPos = $el.val().length;
+
+            if (elem) {
+                try {
+                    if(caretPos && elem.setSelectionRange) {
+                        elem.focus();
+                        elem.setSelectionRange(caretPos,caretPos);
+                    } else if (caretPos && elem.createTextRange) {
+                        var range = elem.createTextRange();
+                        range.collapse(true);
+                        range.moveEnd('character', caretPos);
+                        range.moveStart('character', caretPos);
+                        range.select();
+                    } else {
+                        elem.focus();
+                    }
+                } catch (e) {
+                    elem.focus();
+                }
+            }
+        },
+
+        toTitleCase: function(str) {
+            return str.replace(/\w\S*/g, function(txt){return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();});
+        },
+
+        beginsRegex: function(query) {
+            return new RegExp('^' + query.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&"), 'i');
+        },
+
+        containsRegex: function(query) {
+            return new RegExp(query.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&"), 'i');
+        },
+
+        isMobile: function(type) {
+            var mobiles = {
+                Android: function() {
+                    return navigator.userAgent.match(/Android/i);
+                },
+                BlackBerry: function() {
+                    return navigator.userAgent.match(/BlackBerry/i);
+                },
+                iOS: function() {
+                    return navigator.userAgent.match(/iPhone|iPad|iPod/i);
+                },
+                Opera: function() {
+                    return navigator.userAgent.match(/Opera Mini/i);
+                },
+                Windows: function() {
+                    return navigator.userAgent.match(/IEMobile/i);
+                },
+                any: function() {
+                    return (mobiles.Android() || mobiles.BlackBerry() || mobiles.iOS() || mobiles.Opera() || mobiles.Windows());
+                }
+            };
+
+            return mobiles[type || "any"]();
+        }
+    };
+}, "module/utils");// Popup Mixin shared across modal and contentPopup
+
+define(function(require) {
+    var mediator = require("module/mediator");
+
+    return {
+        initPopupMixin: function() {
+            mediator.on("modal:close", this.close, this);
+            mediator.on("modal:update:title", this.updateTitle, this);
+            mediator.on("modal:showLoading", this.showLoading, this);
+            mediator.on("modal:hideLoading", this.hideLoading, this);
+            mediator.on("modal:showContext", this.showContext, this);
+            mediator.on("modal:hideContext", this.hideContext, this);
+            mediator.on("modal:update:classes", this.updateClasses, this);
+        },
+
+        showContext: function(context) {
+            if (this.$context) {
+                this.$context.removeClass("hidden").css({
+                    opacity: 1
+                }).show();
+                this.$context.find(".modal-context-message").html(context);
+            }
+        },
+
+        hideContext: function(options) {
+            options || (options = {});
+
+            if (options.close) {
+                this.close(options);
+            } else if (options.animate) {
+                this.$context.fadeOut(function() {
+                    $(this).addClass("hidden");
+                });
+            } else {
+                this.$context.addClass("hidden");
+            }
+        },
+
+        showLoading: function(options) {
+            if (this.$loader) {
+                this.$loader.removeClass("hidden");
+                this.showLoader(_.extend({
+                    $target: this.$loader,
+                    loaderClass: "center"
+                }, options));
+            }
+        },
+
+        hideLoading: function() {
+            if (this.$loader) {
+                this.showChrome();
+                this.$loader.addClass("hidden");
+                this.hideLoader();
+            }
+        },
+
+        updateTitle: function(title) {
+            if (this.$el) {
+                this.$el.find(".modal-title").html(title);
+            }
+        },
+
+        showChrome: function() {
+            if (this.$el) {
+                this.$el.find(".modal-header").removeClass("hidden");
+                if (this.options.animate) {
+                    this.$el.find(".modal-view").addClass("fadeIn");
+                }
+            }
+        },
+
+        updateClasses: function(classes) {
+            this.$el.find(".modal-view").removeClass().addClass("modal-view " + classes);
+        }
+    };
+}, "module/mixins/popup");define(function(require) {
+    var sizes = {
+        small: {
+            lines: 11, // The number of lines to draw
+            length: 4, // The length of each line
+            width: 3, // The line thickness
+            radius: 4 // The radius of the inner circle
+        }
+    };
+
+    return {
+        loaderTemplate: Handlebars.templates.loader,
+        showLoader: function(options) {
+            var $target,
+                loader;
+
+            options || (options = {});
+            _.extend(options, {
+                color: "#6D6E71",
+                zIndex: 2
+            });
+
+            if (options.size) {
+                _.extend(options, sizes[options.size]);
+            }
+
+            if (options.target) {
+                $target = $(options.target);
+            } else {
+                $target = options.$target || this.$el;
+            }
+
+            this.spinner && this.hideLoader();
+            loader = this.loaderTemplate({loaderClass: options.loaderClass || "bottom"});
+            if (options.after) {
+                $target.after(loader);
+                this.spinner = new Spinner(options).spin($target.parent().find(".loader")[0]);
+                this.spinner.after = true;
+            } else {
+                $target.append(loader);
+                this.spinner = new Spinner(options).spin($target.find(".loader")[0]);
+            }
+        },
+
+        hideLoader: function() {
+            var $spinnerParent;
+
+            if (this.spinner) {
+                $spinnerParent = $(this.spinner.el).parent();
+                this.spinner.stop();
+                $spinnerParent.remove();
+                this.spinner = null;
+            }
+        }
+    };
+}, "module/mixins/loader");define(function() {
+    "use strict";
+
+    return Backbone.Model.extend({
+        initialize: function(attrs, options) {
+            options || (options = {});
+
+            if (options.url) {
+                this.uri = {
+                    url: options.url
+                };
+            } else if (options.uri) {
+                this.uri = options.uri;
+            }
+
+            return this;
+        },
+
+        url: function() {
+            var url = "",
+                prefix;
+
+            if (this.uri) {
+                url = this.uri.url;
+            } else if (this.collection) {
+                url = _.result(this.collection, "url");
+            }
+
+            prefix = url.match('\\?') ? '&' : '?';
+
+            return url + prefix + $.param({'_nospa': true});
+        },
+
+        editUrl: function() {
+            // a model may or may not have a url
+            try {
+                return this.url() + "/edit";
+            } catch(e) {
+                return "";
+            }
+        },
+
+        parse: function(raw) {
+            var actions,
+                interactions;
+
+            raw || (raw = {});
+
+            // BLASPHEMOUS!!!
+            if (raw.data && raw.data.data) {
+                raw = raw.data;
+            }
+
+            this.uri = raw.uri || this.uri;
+            this.view = raw.view || this.view || {};
+            this.interactions = {};
+            this.actions = {};
+
+            interactions = this.view.interaction;
+            if (interactions) {
+                _.each(interactions, _.bind(this._buildNestedCollection, this, this.interactions));
+            }
+            actions = this.view.action;
+            if (actions) {
+                _.each(actions, _.bind(this._buildNestedCollection, this, this.actions));
+            }
+
+            return raw.data;
+        },
+
+        _buildNestedCollection: function(obj, value, key) {
+            var BaseCollection = require("module/collections/base");
+
+            obj[key] = new BaseCollection(value.data.items, {
+                uri: value.uri,
+                parse: true
+            });
+        },
+
+        // Returns a "unique" key identifier for the collection
+        getCacheKey: function() {
+            return this.url();
+        },
+
+        toData: function() {
+            var interactionData,
+                data = {
+                uri: _.clone(this.uri),
+                view: _.clone(this.view),
+                data: _.clone(this.attributes)
+            };
+
+            _.each(this.interactions, function(interaction, name) {
+                interactionData = interaction.toData();
+                if (interactionData) {
+                    data.view.interaction[name] = interactionData.data;
+                    data.view.interaction[name].data.count = data.view.interaction[name].data.items.length;
+                }
+            });
+
+            return data;
+        },
+
+        toHandlebars: function() {
+            var json = _.clone(this.view || {});
+            json.cid = this.cid;
+            json.editUrl = this.editUrl();
+
+            return json;
+        },
+
+        updateCache: function() {
+            // Notify fetchCached that we should update the cache
+            this.collection && this.collection.updateCache();
+            this.trigger("updateCache", this, this.collection);
+        },
+
+        save: function(attrs, options) {
+            attrs || (attrs = {});
+            options || (options = {});
+
+            if (this.uri) {
+                options.data || (options.data = {});
+                _.extend(options.data, {
+                    _token: this.uri.token
+                });
+            }
+
+            return Backbone.Model.prototype.save.call(this, attrs, options);
+        },
+
+        destroy: function(options) {
+            var paramData;
+
+            paramData = $.param({
+                _token: this.uri.token
+            });
+            options = options ? _.clone(options) : {};
+            options = _.extend({
+                data: paramData
+            }, options);
+
+            return Backbone.Model.prototype.destroy.call(this, options);
+        },
+
+        // Creates a new collection if not already defined and returns
+        // a fetch promise, otherwise it returns a promise which will resolve
+        // immediately. Takes a key name to store the collection on the object,
+        // a Collection constructor, and collection options.
+        fetchStatic: function(key, Collection, options) {
+            var collection = this[key],
+                deferred,
+                promise;
+
+            if (!collection) {
+                collection = new Collection([], options);
+                this[key] = collection;
+                promise = collection.fetch(options);
+            } else {
+                deferred = $.Deferred();
+                promise = deferred.promise();
+                deferred.resolve(collection);
+                if (options.success) {
+                    _.defer(options.success, collection);
+                }
+            }
+
+            // Always return a promise
+            return promise;
+        }
+    });
+}, "module/models/base");define(function() {
+    "use strict";
+
+    var Backbone = require("Backbone"),
+        BaseModel = require("module/models/base");
+
+    return BaseModel.extend({
+
+    });
+}, "module/models/list");define(function() {
+    "use strict";
+
+    var BaseModel = require("module/models/base");
+
+    return Backbone.Collection.extend({
+        model: BaseModel,
+
+        initialize: function(items, options) {
+            options || (options = {});
+            _.extend(options, {
+                parse: true
+            });
+            if (options.uri) {
+                this.uri = options.uri;
+            } else if (options.url) {
+                this.uri = {
+                    url: options.url
+                };
+            } else {
+                this.uri = {};
+            }
+
+            options.next && (this.next = options.next);
+            options.view && (this.view = options.view);
+            this.next && (this.pageStateId = options.next._pageStateId);
+        },
+
+
+        url: function() {
+            var prefix = this.uri.url.match('\\?') ? '&' : '?';
+            return this.uri.url + prefix + $.param({'_nospa': true});
+        },
+
+        get: function(id) {
+            var item = Backbone.Collection.prototype.get.call(this, id);
+
+            // check if item is referenced by view id
+            if (!item) {
+                item = this.find(function(model) {
+                    return model.view && model.view.data.id == id;
+                });
+            }
+
+            return item;
+        },
+
+        parse: function(response) {
+            var data;
+
+            // clear the previous next
+            delete this.next;
+
+            if (_.isArray(response)) {
+                data = response;
+            } else {
+                this.uri = response.data.uri;
+                this.view = response.data.view;
+                this.view && (this.next = this.view.next);
+                this.next && (this.pageStateId = this.next._pageStateId);
+                data = response.data.data.items;
+            }
+
+            return data;
+        },
+
+        // Returns a "unique" key identifier for the collection
+        getCacheKey: function() {
+            var extra = "";
+
+            if (this.next && this.next.filter) {
+                extra = ":" + this.next.filter;
+            } else if (this.filterParam) {
+                extra = ":" + this.filterParam;
+            }
+
+            return this.url() + extra;
+        },
+
+        // Opposite of parse
+        toData: function(options) {
+            var items,
+                data;
+
+            options || (options = {});
+
+            items = this.map(function(model) {
+                return model.toData();
+            });
+
+            // Allow option of not serializing empty object
+            if (options.ensureItems) {
+                if (!items.length) {
+                    return;
+                }
+            }
+
+            data = {
+                uri: this.uri,
+                data: {
+                    items: items
+                }
+            };
+
+            if (this.view) {
+                data.view = {
+                    next: this.next
+                };
+            }
+
+            return {
+                data: data
+            };
+        },
+
+        toHandlebars: function() {
+            return this.map(function(model) {
+                return model.toHandlebars();
+            });
+        },
+
+        updateCache: function() {
+            this.trigger("updateCache", null, this);
+        },
+
+        fetch: function(options) {
+            var jqXHR;
+
+            options = options ? _.clone(options) : {};
+            options.data || (options.data = {});
+            options.parse = true;
+
+            // Merge the current next over the data
+            this.next && (options.data = _.extend(options.data, this.next));
+
+            // Allow overriding of pageStateId
+            this.pageStateId && (options.data._pageStateId = this.pageStateId);
+
+            // Update the collections filter if specified in options
+            options.filter && (this.filterParam = options.filter);
+
+            // Set query filter based on collections filter
+            this.filterParam && (options.data._filter = this.filterParam);
+
+            // Update the collections search query if specified in options
+            options.query && (this.query = options.query);
+
+            // Set the search query based on collections query
+            this.query && (options.data._query = this.query);
+
+            options.query && (options.data._query = options.query);
+            options.count && (options.data._count = options.count);
+
+            jqXHR = Backbone.Collection.prototype.fetch.call(this, options);
+            this.trigger("fetch");
+
+            return jqXHR;
+        },
+
+        clean: function() {
+            delete this.filterParam;
+            delete this.query;
+            delete this.next;
+
+            this.trigger("clean");
+        },
+
+        create: function(data, options) {
+            data = _.extend({
+                _token: this.uri.token
+            }, data);
+
+            // returns model
+            return Backbone.Collection.prototype.create.call(this, data, options);
+        }
+    });
+}, "module/collections/base");define(function() {
+    "use strict";
+
+    var BaseCollection = require("module/collections/base"),
+        List = require("module/models/list");
+
+    return BaseCollection.extend({
+        model: List,
+
+        comparator: function(list) {
+            if (list.get("timestampModified")) {
+                return -list.get("timestampModified");
+            } else {
+                return -list.get("timestampCreated");
+            }
+        }
+    });
+}, "module/collections/lists");define(function(require) {
+    var BaseModel = require("module/models/base");
+
+    return BaseModel.extend({});
+}, "module/models/user");//Simple config mapping helper
+define(function(require) {
+    var BaseModel = require("module/models/base"),
+        Viewer = require("module/models/user");
+
+    return function(config, fn) {
+        var items,
+            view,
+            viewer = {};
+
+        _.isString(config) && (config = {});
+        config || (config = {});
+        config.data || (config.data = {});
+        config.data.data || (config.data.data = {});
+
+        items = config.data.data.items || {};
+        view = config.data.view || {};
+
+        if (config.viewer) {
+            viewer = new Viewer(config.viewer, {
+                parse: true
+            });
+        }
+
+        fn(items, view, viewer);
+    };
+}, "module/with_config");define(function(require) {
+    var mediator = require("module/mediator"),
+        TrackingModule;
+
+    TrackingModule = function(view) {
+        this.view = view;
+        this.mediator = mediator;
+
+        this.mediator.on("tracking:getModel", this.getModel, this);
+    };
+
+    TrackingModule.prototype = {
+        getModel: function(e, fn) {
+            var model,
+                index;
+
+            if (this.view.$el.has(e.currentTarget).length) {
+                model = this.view.getClosestById(e);
+                index = $(e.currentTarget).closest("article").index();
+                fn(model, index);
+            }
+        }
+    };
+
+    return TrackingModule;
+}, "module/tracking");define(function() {
+    "use strict";
+
+    var Backbone = require("Backbone"),
+        loaderMixin = require("module/mixins/loader"),
+        TrackingModule = require("module/tracking"),
+        mediator = require("module/mediator"),
+        utils = require("module/utils");
+
+    return Backbone.View.extend({
+        mediator: mediator,
+
+        initialize: function(options) {
+            options || (options = {});
+            options.template && !this.template && (this.template = options.template);
+            _.extend(this, loaderMixin);
+            new TrackingModule(this);
+        },
+
+        stopProp: function(e) {
+            if (e && e.stopPropagation) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        },
+
+        stopPropagation: function(e) {
+            e && e.stopPropagation && e.stopPropagation();
+        },
+
+        resetView: function() {
+            this.hideLoader();
+            this.$el.html("").css({
+                height: "auto"
+            });
+            this.dropdown && this.dropdown.remove();
+            this.undelegateEvents();
+            this.infiniteScroll && this.infiniteScroll.enableFetch();
+        },
+
+        onError: function(obj, response) {
+            var message = "";
+
+            if (response.statusText === "abort" || response.status === 0) {
+                return;
+            }
+
+            try {
+                response = JSON.parse(response.responseText);
+                message = response.meta.message;
+            } catch (e) {
+                message = "Don't worry. The engineers will pay dearly for this outage.";
+            }
+
+            this.hideLoader && this.hideLoader();
+            this.$el.find(".no-results").remove();
+            this.$el.after(Handlebars.templates.onError({
+                message: message
+            }));
+        },
+
+        initScroller: function(){
+            var $scrollerWrap = this.$el.find('.antiscroll-wrap'),
+                $scrollerInner = this.$el.find('.antiscroll-inner');
+
+            if (!$scrollerWrap.length && this.$el.hasClass("antiscroll-wrap")) {
+                $scrollerWrap = this.$el;
+            }
+
+            if ($scrollerWrap) {
+                $scrollerWrap.width($scrollerWrap.width());
+                $scrollerInner.width($scrollerWrap.width());
+                $scrollerWrap.find(".antiscroll-inner").css({
+                    "height": $scrollerWrap.height() + "px",
+                    "overflow-y": "scroll"
+                });
+            }
+            if (!this.options.osScroller && !utils.isMobile()) {
+                this.scroller && this.scroller.destroy();
+                this.scroller = $scrollerWrap.antiscroll({
+                    x: false
+                }).data('antiscroll');
+            }
+        },
+
+        getClosestById: function(e) {
+            return this.collection.get($(e.currentTarget).closest("[data-id]").attr("data-id"));
+        },
+
+        getItemById: function(e, closest) {
+            var item;
+
+            if (closest) {
+                item = this.collection.get($(e.currentTarget).closest(closest).attr("data-id"));
+            } else {
+                item = this.collection.get($(e.currentTarget).attr("data-id"));
+            }
+
+            return item;
+        },
+
+        getItemByCid: function(e) {
+            return this.collection.getByCid($(e.currentTarget).attr("data-cid"));
+        }
+    });
+}, "module/views/base");define(function(require) {
+    "use strict";
+
+    var BaseView = require("module/views/base"),
+        mediator = require("module/mediator");
+
+    return BaseView.extend({
+        successMessageDelay: 2000,
+
+        events: {
+            "click .close": "close"
+        },
+
+        initialize: function(options) {
+            _.bindAll(this, "showConfirm", "confirmCancel", "onConfirm", "close", "onSuccess", "onError");
+            BaseView.prototype.initialize.call(this, options);
+        },
+
+        showConfirm: function(options) {
+            mediator.trigger("modal:showContext", Handlebars.templates.confirm(options));
+            options.onConfirm && (this.onConfirm = options.onConfirm);
+
+            $("#confirm").off("click", this.onConfirm);
+            $("#confirm").on("click", this.onConfirm.bind(this));
+            $("#confirm-cancel").off("click", this.confirmCancel);
+            $("#confirm-cancel").on("click", this.confirmCancel.bind(this));
+        },
+
+        confirmCancel: function(e) {
+            this.stopProp(e);
+            mediator.trigger("modal:hideContext");
+        },
+
+        onConfirm: function(e) {
+            this.stopProp(e);
+        },
+
+        showLoading: function() {
+            mediator.trigger("modal:showLoading");
+        },
+
+        hideLoading: function() {
+            mediator.trigger("modal:hideLoading");
+        },
+
+        close: function(e) {
+            this.stopProp(e);
+            this.undelegateEvents();
+            $("#confirm").off("click", this.onConfirm);
+            $("#confirm-cancel").off("click", this.confirmCancel);
+
+            this.trigger("close", e);
+            mediator.trigger("modal:close", e);
+        },
+
+        onSuccess: function(model, response) {
+            mediator.trigger("modal:hideLoading");
+            mediator.trigger("modal:showContext", response.meta.message);
+            setTimeout(function() {
+                mediator.trigger("modal:hideContext", {
+                    close: true,
+                    animate: true
+                });
+            }, this.successMessageDelay);
+        },
+
+        onError: function(model, response) {
+            response = JSON.parse(response.responseText);
+
+            mediator.trigger("modal:hideLoading");
+            mediator.trigger("modal:showContext", response.meta.message);
+            setTimeout(function() {
+                mediator.trigger("modal:hideContext", {
+                    animate: true
+                });
+            }, this.successMessageDelay);
+        }
+    });
+}, "module/views/overlay_view");define(function(require) {
+    var BaseView = require("module/views/base"),
+        popupMixin = require("module/mixins/popup"),
+        mediator = require("module/mediator");
+
+    return BaseView.extend({
+        el: "body",
+        template: Handlebars.templates.modal,
+
+        events: {
+            "click .modal-close": "close",
+            "click .modal-wrap": "stopPropagation",
+            "keyup": "keyPress"
+        },
+
+        initialize: function(options) {
+            BaseView.prototype.initialize.call(this, options);
+            this.templateOptions = options.templateOptions || {};
+            options.animate && (this.templateOptions.animate = options.animate);
+            this.ModalView = options.view;
+            this.viewOptions = options.viewOptions || {};
+            this.afterRender = options.afterRender || function() {};
+            this.skipLoader = options.skipLoader || false;
+
+            if (!this.options.disableClickToClose) {
+                this.events = _.extend({}, this.events, {
+                    "click": "close"
+                });
+            }
+
+            _.extend(this, popupMixin);
+            this.initPopupMixin();
+
+            this.viewOptions = _.extend({
+                el: ".modal-body"
+            }, this.viewOptions);
+
+            BaseView.prototype.initialize.call(this, options);
+
+            this.render();
+        },
+
+        render: function() {
+            this.$el.append(this.template(_.extend({
+                modalClass: this.options.modalClass,
+                title: this.options.title,
+                subTitle: this.options.subTitle,
+                noCloseButton: this.options.noCloseButton || this.options.unclosable
+            }, this.templateOptions)));
+            this.$el.addClass("modal-mode");
+            this.$loader = this.$el.find(".loading");
+            this.$context = this.$el.find(".modal-context");
+
+            if (!this.skipLoader && !this.options.contentTemplate) {
+                this.showLoading();
+            } else {
+                _.defer(this.showChrome.bind(this));
+            }
+
+            if (this.ModalView) {
+                this.modalView = new this.ModalView(this.viewOptions);
+                this.modalView.on("close", this.close, this);
+            } else if (this.options.contentTemplate) {
+                this.$el.find(".modal-body").html(
+                    this.options.contentTemplate(this.options.contentTemplateData)
+                );
+            }
+            this.afterRender(this);
+            this.trigger("afterRender");
+        },
+
+        keyPress: function(e) {
+            if (e.keyCode === 27) {
+                this.close();
+            }
+        },
+
+        close: function(options) {
+            options || (options = {});
+
+            if (this.options.unclosable) {
+                return;
+            }
+
+            if (options.animate) {
+                this.$el.find(".modal-view").fadeOut(this._close.bind(this));
+            } else {
+                this._close();
+            }
+        },
+
+        _close: function() {
+            this.undelegateEvents();
+            this.$el.removeClass("modal-mode");
+            this.$el.find(".modal-view").remove();
+            this.trigger("close");
+            this.modalView && this.modalView.trigger("modal:close");
+        }
+    });
+}, "module/modal");define(function(require) {
+    var mediator = require("module/mediator"),
+        popupMixin = require("module/mixins/popup"),
+        loaderMixin = require("module/mixins/loader"),
+        utils = require("module/utils"),
+        ContentPopup;
+
+    ContentPopup = function(options, e) {
+        this.options = options ? _.clone(options) : {};
+        this.options.viewOptions || (this.options.viewOptions = {});
+        this.options.onShow || (this.options.onShow = function(){});
+        this.options.onHide || (this.options.onHide = function(){});
+
+        // Default qtip options
+        var qtipOptions = {
+            overwrite: !!this.options.overwrite,
+            position: {
+                my: "left center",
+                at: "right center",
+                target: this.options.pointerTarget || this.options.target,
+                viewport: $(".wrapper-content"),
+                adjust: {
+                    resize: this.options.resize || false,
+                    method: "flip none",
+                    x: -1,
+                    y: -3
+                }
+            },
+            show: {
+                event: e ? e.type :"click",
+                ready: this.options.immediate
+            },
+            hide: {
+                event: "click unfocus"
+            },
+            events: {
+                show: this.onShow.bind(this),
+                hidden: this.onHidden.bind(this)
+            },
+            content: Handlebars.templates.contentPopup(_.extend({
+                title: this.options.title
+            }, this.options.popupTemplateOptions)),
+            style: {
+                tip: {
+                    height: 15,
+                    width: 20
+                }
+            }
+        };
+
+        // Allow for user overrides
+        this.options.position && _.extend(qtipOptions.position, this.options.position);
+        this.options.show && _.extend(qtipOptions.show, this.options.show);
+        this.options.hide && _.extend(qtipOptions.hide, this.options.hide);
+        this.options.events && _.extend(qtipOptions.events, this.options.events);
+        this.options.style && _.extend(qtipOptions.style, this.options.style);
+
+        this.$target = this.options.target.qtip(qtipOptions, e);
+
+        this.initPopupMixin();
+
+        mediator.on("reflow", this.reposition, this);
+
+        return this;
+    };
+
+    ContentPopup.prototype = _.extend({
+        size: {
+            height: 0,
+            width: 0
+        },
+
+        onShow: function(e, api) {
+            this.$el = api.elements.tooltip;
+            this.$loader = this.$el.find(".loading");
+            this.$context = this.$el.find(".modal-context");
+            api.elements.tooltip.on("click", ".modal-close", this.close.bind(this));
+
+            // View specified, render view
+            if (!this.view) {
+                if (this.options.view) {
+                    if (!this.options.skipLoader) {
+                        this.showLoading(this.options.spinnerOptions);
+                    } else {
+                        _.defer(this.showChrome.bind(this));
+                    }
+                    this.view = new this.options.view(_.extend({
+                        el: api.elements.tooltip.find(".modal-body")
+                    }, this.options.viewOptions));
+                } else {
+                    // No view, append passed in content
+                    api.elements.tooltip.find(".modal-body").append(this.options.content);
+                    _.defer(this.showChrome.bind(this));
+                }
+            }
+            this.options.onShow(e, api);
+
+            this.watchResize(api);
+        },
+
+        onHidden: function(e, api) {
+            if (this.view && !!this.options.overwrite) {
+                this.view.trigger("close");
+                this.view.resetView();
+                delete this.view;
+                if (this.options.immediate) {
+                    api.destroy();
+                }
+            }
+            this.options.onHide(e, api);
+            api.elements.tooltip.off("click", ".modal-close");
+            clearTimeout(this.resizeTimeout);
+        },
+
+        watchResize: function(api) {
+            var height = api.elements.tooltip.outerHeight(),
+                width = api.elements.tooltip.outerWidth();
+
+            if (height !== this.size.height || width !== this.size.width) {
+                this.size.height = height;
+                this.size.width = width;
+                this.reposition();
+            }
+            this.resizeTimeout = setTimeout(_.bind(this.watchResize, this, api), 100);
+        },
+
+        reposition: function() {
+            this.$target.qtip("reposition");
+        },
+
+        close: function() {
+            this.$target.qtip("hide");
+        }
+   }, loaderMixin, popupMixin);
+
+    return ContentPopup;
+}, "module/content_popup");define(function(require) {
+    var ModalView = require("module/modal");
+
+    return ModalView.extend({
+
+        initialize: function(options) {
+            ModalView.prototype.initialize.call(this, options);
+        },
+
+        resizeWindow: function(width, height) {
+            // Resize the window, keeping it centered in the same location
+            var newWidth  = width + window.outerWidth - window.innerWidth,
+                newHeight = height + window.outerHeight - window.innerHeight,
+                newLeft   = window.screenX - (newWidth - window.outerWidth) / 2,
+                newTop    = window.screenY - (newHeight - window.outerHeight) / 2;
+
+            window.moveTo(newLeft, newTop);
+            window.resizeTo(newWidth, newHeight);
+        },
+
+        close: function(options) {
+            window.close();
+        }
+    });
+}, "module/mozbar_overlay");define(function(require) {
+    var ModalView = require("module/modal"),
+        mediator = require("module/mediator");
+
+    return ModalView.extend({
+        template: Handlebars.templates.litebarOverlay,
+
+        events: {
+            "click body": "stopPropagation"
+        },
+
+        initialize: function(options) {
+            var i;
+
+            if (typeof(options.disableClickToClose) === 'undefined')
+                options.disableClickToClose = true;
+
+            ModalView.prototype.initialize.call(this, options);
+
+            if (options.resizeEvents) {
+                for (i=0; i<options.resizeEvents.length; i++) {
+                    mediator.on(options.resizeEvents[i], this.resizeOverlay,this);
+                }
+            }
+        },
+
+        resizeOverlay: function() {
+            var width = $('.litebar-overlay-content').outerWidth();
+                height = $('.litebar-overlay-content').outerHeight();
+            SU.ToolbarAction.resizePanel({id: this.options.overlayId, size: { width: width, height: height }});
+        },
+
+        close: function(options) {
+            SU.ToolbarAction.destroyOverlay(this.options.overlayId);
+        }
+    });
+}, "module/litebar_overlay");define(function() {
+    var BaseView = require("module/views/base"),
+        mediator = require("module/mediator"),
+        utils = require("module/utils"),
+        UP = 38,
+        DOWN = 40,
+        ENTER = 13,
+        SHIFT = 16,
+        ESC = 27;
+
+    return BaseView.extend({
+        el: "body",
+        template: Handlebars.templates.dropdown,
+        dropdownTemplate: Handlebars.templates.dropdownList,
+        currentItem: 0,
+        focusItem: -1,
+        cachedResults: {},
+        requestFinished: true,
+
+        initialize: function(options) {
+            _.bindAll(this, "hideDropdown", "focusOption", "unFocusOption",
+                    "selectOption", "filterItems", "createNew", "keyPress");
+            this.options.position || (this.options.position = {});
+            this.options.offset || (this.options.offset = {top: 0, left: 0});
+            this.ajaxKey = options.ajaxKey || "query";
+            this.itemKey = options.itemKey || "name";
+            this.absolute = !this.options.position.static;
+            this.dropdownItemsSelector = ".dropdown-items-wrap[data-cid='" + this.cid + "']";
+
+            mediator.on("dropdown:clean", this.clean, this);
+            mediator.on("dropdown:inputUpdate", this.inputUpdate, this);
+
+            this.renderDropdown();
+            if (!options.noFocus) {
+                this.$el.find(".dropdown-search").focus();
+            }
+        },
+
+        attachDropdownEvents: function(dropdownItemsSelector) {
+            $("body").off("mouseover", ".dropdown-item");
+            $("body").on("mouseover", this.dropdownItemsSelector + " .dropdown-item", this.focusOption);
+            $("body").off("mouseout", ".dropdown-item");
+            $("body").on("mouseout", this.dropdownItemsSelector + " .dropdown-item", this.unFocusOption);
+            $("body").off("click", ".dropdown-item");
+            $("body").on("click", this.dropdownItemsSelector + " .dropdown-item", this.selectOption);
+            this.$dropdown.find(".dropdown-search").on("keyup", this.keyPress);
+            this.$dropdown.find(".dropdown-search").on("keyup keydown keypress", this.filterItems);
+
+            $(window).on("click", this.hideDropdown.bind(this));
+        },
+
+        stopPropagation: function(e) {
+            e.stopPropagation();
+            e.preventDefault();
+        },
+
+        clean: function() {
+            this.inputUpdate("");
+            this.abortServerFilter();
+            this.resetFocus();
+        },
+
+        remove: function() {
+            this.$dropdownItems.remove();
+            Backbone.View.prototype.remove.call(this);
+        },
+
+        inputUpdate: function(val) {
+            this.$el.find(".dropdown-search").val(val);
+        },
+
+        toDropdownFormat: function(collection) {
+            var self = this;
+
+            return collection.map(function(item) {
+                return {
+                    cid: item.cid,
+                    value: item.get(self.itemKey),
+                    valueToBold: ""
+                };
+            });
+        },
+
+        toMatchFormat: function(collection, query, filter) {
+            var self = this,
+                match = false,
+                items = [],
+                queryLength,
+                matchIndex,
+                itemJSON,
+                value,
+                json,
+                regex;
+
+            collection.each(function(item) {
+                value = item.get(self.itemKey);
+                regex = utils.beginsRegex(query);
+                itemJSON = item.toHandlebars();
+                itemJSON.value = value;
+                if (regex.test(value) && query) {
+                    queryLength = query.length;
+                    matchIndex = value.indexOf(query);
+                    if (value === query) {
+                        match = true;
+                        itemJSON.valueToBold = value;
+                        itemJSON.value = "";
+                    } else if (queryLength > 0) {
+                        itemJSON.valueToBold = value.substring(matchIndex, matchIndex + queryLength + 1);
+                        itemJSON.valueBefore = value.substring(0, matchIndex);
+                        itemJSON.value = value.substring(matchIndex + queryLength + 1);
+                    }
+                    filter && items.push(itemJSON);
+                } else if (!query || !filter){
+                    items.push(itemJSON);
+                }
+            });
+
+            return {
+                items: items,
+                match: match
+            };
+        },
+
+        renderDropdown: function() {
+            var data = this.toDropdownFormat(this.collection);
+
+            this.rendered = true;
+            this.$el.html(this.template({
+                items: data,
+                viewCid: this.cid,
+                allowCreate: this.options.allowCreate,
+                placeholder: this.options.placeholder,
+                absolute: this.absolute
+            }));
+            this.$dropdown = this.$el.find(".dropdown[data-cid='" + this.cid + "']");
+            this.$dropdownItems = $(this.dropdownItemsSelector);
+
+            if (this.absolute) {
+                $('body').append(this.dropdownTemplate({
+                    items: data,
+                    viewCid: this.cid,
+                    allowCreate: this.options.allowCreate
+                }));
+                this.$dropdownItems = $(this.dropdownItemsSelector);
+            } else {
+                this.$dropdownItems.show();
+            }
+            this.initScroller();
+            this.$el.find('.dropdown-search').placeholder();
+
+            this.attachDropdownEvents();
+        },
+
+        positionDropdown: function() {
+            var targetPos = this.$dropdown.offset(),
+                targetWidth = this.$dropdown.outerWidth(),
+                css;
+
+            this.options.offset.top || (this.options.offset.top = 0);
+            this.options.offset.left || (this.options.offset.left = 0);
+
+            css = {
+                position: "absolute",
+                height: this.options.height || 300,
+                width: this.options.width || targetWidth,
+                top: targetPos.top + this.$dropdown.outerHeight() + this.options.offset.top,
+                left: targetPos.left + this.options.offset.left,
+                'z-index': 5
+            };
+
+            this.$dropdownItems.css(css);
+        },
+
+        updateDropdown: function(items, query, match) {
+            if (items.length) {
+                items[0].preSelected = true;
+            }
+
+            $(this.dropdownItemsSelector).replaceWith(Handlebars.templates.dropdownList({
+                viewCid: this.cid,
+                items: items,
+                query: query,
+                match: match,
+                allowCreate: this.options.allowCreate,
+                absolute: this.absolute
+            }));
+            this.$dropdownItems = $(this.dropdownItemsSelector);
+            this.absolute && this.positionDropdown();
+            this.resetFocus();
+
+            if (!this.options.allowCreate && !items.length){
+                this.hideDropdown();
+            } else {
+                this.showDropdown();
+                this.initScroller();
+            }
+        },
+
+        hideDropdown: function() {
+            if (!this.options.disableHide) {
+                this.$dropdownItems.hide();
+            }
+        },
+
+        showDropdown: function() {
+            this.$dropdownItems.show();
+        },
+
+        filterItems: function(e) {
+            var query = this.$dropdown.find(".dropdown-search").val();
+
+            this.abortServerFilter();
+            if (e && !e.shiftKey && (e.which === UP || e.which === DOWN || e.which === ESC)) {
+                e.preventDefault();
+                return;
+            } else if (e.which === ENTER){
+                e.preventDefault();
+                this.hideDropdown();
+                if (this.requestFinished) {
+                    return;
+                }
+            }
+
+            if (e.which !== SHIFT) {
+                if (this.options.ajax) {
+                    this.filterServer(query);
+                } else {
+                    this.filterLocal(query);
+                }
+            }
+        },
+
+        filterServer: _.debounce(function(query) {
+            var self = this,
+                results = this.cachedResults[query],
+                data;
+
+            if (!query || query.length <= 2) {
+                this.hideDropdown();
+                return;
+            }
+
+            if (results) {
+                this.collection.reset(this.collection.parse(results), {
+                    silent: true,
+                    parse: true
+                });
+                data = self.toMatchFormat(self.collection, query);
+                self.updateDropdown(data.items, query, false);
+            } else {
+                data = {};
+
+                this.requestFinished = false;
+                this.showSpinner();
+                this.activeAjaxRequest = this.collection.fetch({
+                    parse: true,
+                    data: data,
+                    query: query,
+                    success: function(collection, data) {
+                        self.requestFinished = true;
+                        self.cachedResults[query] = data;
+
+                        self.hideSpinner();
+                        data = self.toDropdownFormat(self.collection);
+                        self.updateDropdown(data, query, false);
+                    }
+                });
+            }
+        }, 100),
+
+        abortServerFilter: function() {
+            if (this.activeAjaxRequest) {
+                this.hideSpinner();
+                this.activeAjaxRequest.abort();
+                delete this.activeAjaxRequest;
+            }
+        },
+
+        filterLocal: function(query) {
+            var data = this.toMatchFormat(this.collection, query, true);
+            this.updateDropdown(data.items, query, data.match);
+        },
+
+        keyPress: function(e) {
+            var target,
+                $input = this.$dropdown.find(".dropdown-search"),
+                itemCount = this.$dropdownItems.find(".dropdown-item").length - 1,
+                focusItem;
+
+            // Will refator this
+            if (e.which === UP) {
+                focusItem = this.focusItem - 1;
+                focusItem = focusItem < 0 ? itemCount : focusItem;
+                target = this.$dropdownItems.find(".dropdown-item:eq(" + focusItem + ")").get(0);
+                e.currentTarget = target;
+                this.scrollToTarget(e);
+                this.focusOption(e);
+            } else if (e.which === DOWN) {
+                focusItem = this.focusItem + 1;
+                focusItem = focusItem > itemCount ? 0 : focusItem;
+                target = this.$dropdownItems.find(".dropdown-item:eq(" + focusItem + ")").get(0);
+                e.currentTarget = target;
+                this.scrollToTarget(e);
+                this.focusOption(e);
+            } else if (e.which === ENTER) {
+                target = this.$dropdownItems.find(".dropdown-item:eq(" + this.focusItem + ")").get(0);
+                e.currentTarget = target;
+                if (this.requestFinished) {
+                    this.selectOption(e);
+                }
+            } else if (e.which === ESC) {
+                if ($input.is(":focus")) {
+                    this.hideDropdown();
+                }
+            }
+        },
+
+        scrollToTarget: function(e) {
+            var $item = $(e.currentTarget);
+                $dropdownContent = this.$dropdownItems.find(".dropdown-items"),
+                dropdownScrollTop = $dropdownContent.scrollTop(),
+                itemTop = $item.position().top;
+
+            $dropdownContent.scrollTop(dropdownScrollTop + itemTop);
+        },
+
+        focusOption: function(e) {
+            var $item = $(e.currentTarget);
+
+            this.focusItem = this.$dropdownItems.find(".dropdown-item").index($item);
+            this.$dropdownItems.find(".dropdown-item").removeClass("s-active");
+            $item.addClass("s-active");
+        },
+
+        unFocusOption: function(e) {
+            this.resetFocus();
+            this.$dropdownItems.find(".dropdown-item").removeClass("s-active");
+        },
+
+        resetFocus: function() {
+            // Reset the focus to top
+            this.focusItem = 0;
+        },
+
+        showSpinner: function() {
+            if (!this.spinner) {
+                this.spinner = new Spinner({
+                    lines: 11, // The number of lines to draw
+                    length: 3, // The length of each line
+                    width: 2, // The line thickness
+                    radius: 4, // The radius of the inner circle
+                    color: '#888' // #rgb or #rrggbb
+                });
+            }
+            this.spinner.spin(this.$dropdown.find(".spinner").get(0));
+            this.$dropdown.addClass("spinning");
+        },
+
+        hideSpinner: function() {
+            this.spinner.stop();
+            this.$dropdown.removeClass("spinning");
+        },
+
+        selectOption: function(e) {
+            var $item = $(e.currentTarget),
+                item = this.collection.getByCid($item.data("cid"));
+
+            this.stopPropagation(e);
+            this.hideDropdown();
+
+            if (item) {
+                // update text field with selection
+                this.$dropdown.find(".dropdown-search").val(item.get(this.itemKey));
+                item.set("selected", true);
+                this.trigger("item:selected", item);
+            } else {
+                this.createNew();
+            }
+        },
+
+        createNew: function() {
+            var query = this.$dropdown.find(".dropdown-search").val();
+
+            if (query) {
+                this.trigger("createNew", {item: query});
+            }
+        }
+    });
+}, "module/dropdown");define(function() {
+    "use strict";
+
+    var OverlayView = require("module/views/overlay_view"),
+        Lists = require("module/collections/lists"),
+        BaseModel = require("module/models/base"),
+        Dropdown = require("module/dropdown"),
+        mediator = require("module/mediator");
+
+    return OverlayView.extend({
+        successMessageDelay: 1500,
+        initialize: function(options) {
+            var self = this;
+
+            options.dropdownOptions || (this.options.dropdownOptions = {});
+            OverlayView.prototype.initialize.call(this, options);
+
+            this.collection = new Lists([], {
+                url: options.viewer.view.data.urlLists
+            });
+
+            this.collection.fetch({
+                cache: {
+                    TTL: 60 * 60 * 24
+                },
+                data: {
+                    _view: "selectStumbleList",
+                    _count: 500
+                },
+                success: function(collection) {
+                    self.collection = collection;
+                    self.renderSelect();
+                    mediator.trigger("view:listSelect:ready");
+                }
+            });
+        },
+
+        renderSelect: function() {
+            mediator.trigger("modal:hideLoading");
+
+            this.dropdown = new Dropdown({
+                el: this.el,
+                target: this.$el,
+                collection: this.collection,
+                height: this.options.dropdownOptions.height || 235,
+                width: this.options.dropdownOptions.width || 307,
+                immediate: this.options.dropdownOptions.immediate,
+                allowCreate: this.options.dropdownOptions.allowCreate,
+                disableHide: true,
+                position: {
+                    static: true
+                }
+            });
+
+            this.dropdown.on("item:selected", this.addToList.bind(this));
+            this.dropdown.on("createNew", this.createList.bind(this));
+            this.on("modal:close", this.dropdown.remove, this.dropdown);
+        },
+
+        addToList: function(model) {
+            var self = this,
+                list = this.collection.get(model.id),
+                listItem;
+
+            this.showLoading();
+
+            listItem = new BaseModel({
+                listId: list.id,
+                urlId: this.options.urlId ? this.options.urlId : '',
+                url: this.options.url ? this.options.url : ''
+            }, {
+                uri: list.view.data.items.uri
+            });
+
+            listItem.save({}, {
+                success: this.onSuccess.bind(this),
+                error: this.onError.bind(this)
+            });
+        },
+
+        createList: function(data) {
+            var ListEditView = require("module/views/list_edit_view"),
+                list;
+
+            list = new BaseModel({
+                name: data.item
+            }, {
+                uri: this.collection.uri
+            });
+
+            mediator.trigger("modal:update:title", "Create List");
+            new ListEditView({
+                el: this.el,
+                model: list,
+                collection: this.collection,
+                urlId: this.options.urlId ? this.options.urlId : '',
+                url: this.options.url ? this.options.url : ''
+            });
+        }
+    });
+}, "module/views/lists_select_view");define(function(require) {
+    var OverlayView = require("module/views/overlay_view");
+
+    return OverlayView.extend({
+        template: Handlebars.templates.listEdit,
+        events: {
+            "click #list-save": "save",
+            "submit .modal-form": "save",
+            "click #list-destroy": "requestConfirm",
+            "click #list-cancel": "close"
+        },
+
+        initialize: function(options) {
+            OverlayView.prototype.initialize.call(this, options);
+
+            this.list = options.list;
+            this.urlId = options.urlId;
+            this.url = options.url;
+
+            this.render();
+
+            this.mediator.trigger("view:listEdit:ready");
+        },
+
+        render: function() {
+            var data,
+                json;
+
+            if (this.model.isNew()) {
+                json = {
+                    name: this.model.get("name"),
+                    description: "",
+                    visibility: "",
+                    isNew: true
+                };
+            } else {
+                data = this.model.toHandlebars();
+                json = {
+                    name: data.data.namePretty,
+                    description: data.data.description,
+                    visibility: data.data.visibility,
+                    isNew: false
+                };
+            }
+
+            this.$el.html(this.template(json));
+            this.delegateEvents(this.events);
+
+            if (this.model.isNew()) {
+                this.$el.find("#list-edit-description").focus();
+            }
+            return this;
+        },
+
+        requestConfirm: function(e) {
+            this.stopProp(e);
+            this.showConfirm({
+                message: "Are you sure you want to<br/>delete this list?",
+                onConfirm: this.destroy
+            });
+        },
+
+        save: function(e) {
+            var name = this.$el.find("#list-edit-name").val(),
+                description = this.$el.find("#list-edit-description").val(),
+                visibility = this.$el.find('input:radio[name=visibility]:checked').val(),
+                extraParams = {},
+                data;
+
+            this.stopProp(e);
+            this.mediator.trigger("modal:showLoading");
+
+            data = {
+                name: name,
+                description: description,
+                visibility: visibility
+            };
+            this.urlId && (data.urlId = this.urlId);
+            this.url && (data.url = this.url);
+            if (this.model.isNew()) {
+                extraParams._view = "selectStumbleList";
+            } else {
+                extraParams._view = this.options.requestView || "";
+            }
+
+            // update model view :( :( :(
+            if (this.model.view) {
+                this.model.view.data.namePretty = name;
+                this.model.view.data.description = description;
+                this.model.view.data.visibility = visibility;
+            }
+
+            this.model.save(data, {
+                success: this.listCreated.bind(this),
+                error: this.onError.bind(this),
+                data: extraParams,
+                wait: true
+            });
+        },
+
+        listCreated: function() {
+            if (this.collection && !this.model.collection) {
+                this.collection.add(this.model);
+            }
+            this.onSuccess.apply(this, arguments);
+        },
+
+        destroy: function() {
+            this.mediator.trigger("modal:hideContext");
+            this.mediator.trigger("modal:showLoading");
+
+            this.model.destroy();
+            if (this.options.waitOnDestroy) {
+                mediator.trigger("modal:showLoading");
+            } else {
+                this.close();
+            }
+        }
+    });
+}, "module/views/list_edit_view");

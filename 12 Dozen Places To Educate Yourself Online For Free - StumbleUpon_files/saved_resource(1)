@@ -1,0 +1,8 @@
+ 
+st81423_160X600A='/ST=0RjY0w6r1VCF2K220G1s4Q2_3S02va02va0';
+document.write('<SCR'+'IPT type="text/javascript" language="JavaScript">');
+document.write('  aj_server = \'http://adconductor.rotator.hadj7.adjuggler.net/servlet/ajrotator/\'; aj_tagver = \'1.0\';');
+document.write('  aj_zone = \'adconductor\'; aj_adspot = \'349923\'; aj_page = \'0\'; aj_dim =\'335978\'; aj_ch = \'\'; aj_ct = \'\'; aj_kw = \'&url=http://www.marcandangel.com/2010/11/15/12-dozen-places-to-self-educate-yourself-online/\';');
+document.write('  aj_pv = true; aj_click = \'\';');
+document.write('</SCR'+'IPT><SCR'+'IPT type="text/javascript" language="JavaScript" src="http://cdn.hadj7.adjuggler.net/banners/ajtg.js"></SCR'+'IPT>');
+ 

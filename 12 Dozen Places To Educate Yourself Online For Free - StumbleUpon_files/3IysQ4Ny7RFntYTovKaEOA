@@ -1,0 +1,8 @@
+(function(){
+    SU.addInit("mStumbleButton", function(){
+        $body.delegate(".stumble-button", press, function(e){
+            e.preventDefault();
+            SU.ToolbarAction.stumble($(this).data());
+        });
+    });
+}).call(this);

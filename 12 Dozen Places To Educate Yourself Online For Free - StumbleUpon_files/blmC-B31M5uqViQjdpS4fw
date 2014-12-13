@@ -1,0 +1,23 @@
+(function() {
+    SU.addInit("pOverlayInterests", function(config) {
+        var $modes = $('#webtb-modes-and-interests');;
+
+        // When mode is clicked, up a counter
+        $modes.on('click', 'a', function(e){
+            var $targ = $(e.target);
+
+            if ($targ.data('mode')) {
+                var params = {
+                    "_token": config._counter_token,
+                    "counter": "interest_overlay_mode_click_"+$targ.data('mode'),
+                    "device": suExtensionApi._info.provider
+                };
+
+                var url = "/su/overlay/action/track";
+                Sync(url).update(params);
+            }
+
+            return true;
+        });
+    });
+}).call(this);
